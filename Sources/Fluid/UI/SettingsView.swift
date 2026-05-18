@@ -1398,9 +1398,6 @@ struct SettingsView: View {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text("Dictation Processing Speed")
                                         .font(.body)
-                                    Text(self.settings.parakeetFinalizationMode.detailText)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
                                 }
 
                                 Spacer()
@@ -1415,10 +1412,7 @@ struct SettingsView: View {
                                 .disabled(self.asr.isRunning)
                             }
 
-                            Text("Normal: most reliable and standard.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Text("Fast: faster, but maybe inaccurate.")
+                            Text("Normal: most reliable and standard. Fast: faster, but maybe inaccurate.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
 
