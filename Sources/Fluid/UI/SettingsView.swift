@@ -1385,6 +1385,47 @@ struct SettingsView: View {
                     }
                     .padding(16)
                 }
+
+                // Experimental Card
+                ThemedCard(style: .standard) {
+                    VStack(alignment: .leading, spacing: 14) {
+                        Label("Experimental Settings", systemImage: "exclamationmark.triangle")
+                            .font(.headline)
+                            .foregroundStyle(.primary)
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(alignment: .center) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Dictation Processing Speed")
+                                        .font(.body)
+                                }
+
+                                Spacer()
+
+                                Picker("", selection: self.$settings.parakeetFinalizationMode) {
+                                    ForEach(ParakeetFinalizationMode.allCases) { mode in
+                                        Text(mode.displayName).tag(mode)
+                                    }
+                                }
+                                .pickerStyle(.menu)
+                                .frame(width: 170, alignment: .trailing)
+                                .disabled(self.asr.isRunning)
+                            }
+
+                            Text("Standard: most reliable. Fast: faster, but maybe inaccurate.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+
+                            if self.asr.isRunning {
+                                Text("Settings are disabled during active recording")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .italic()
+                            }
+                        }
+                    }
+                    .padding(16)
+                }
             }
             .padding(16)
         }

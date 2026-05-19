@@ -267,6 +267,15 @@ final class ASRService: ObservableObject {
         )
     }
 
+    private func elapsedMilliseconds(since start: TimeInterval?) -> Int {
+        guard let start else { return -1 }
+        return Int(((Date().timeIntervalSince1970 - start) * 1000).rounded())
+    }
+
+    private func benchmarkLog(_ message: String) {
+        DebugLogger.shared.info("ASR_BENCH session=\(self.benchmarkSessionID) \(message)", source: "ASRBenchmark")
+    }
+
     private func streamingChunkErrorCategory(for error: Error) -> String {
         if error is CancellationError {
             return "cancelled"
@@ -496,6 +505,11 @@ final class ASRService: ObservableObject {
     private var isProcessingChunk: Bool = false
     private var skipNextChunk: Bool = false
     private var previousFullTranscription: String = ""
+    private var benchmarkSessionID: Int = 0
+    private var benchmarkRecordingStartedAt: TimeInterval?
+    private var benchmarkStreamingChunkIndex: Int = 0
+    private var benchmarkCompletedStreamingChunks: Int = 0
+    private var benchmarkLastChunkSampleCount: Int = 0
     private let streamingChunkAnalyticsSuccessSampleRate: Int = 50
     private let streamingChunkFailureMinIntervalSeconds: TimeInterval = 15
     private var streamingChunkAnalyticsSuccessCount: Int = 0
@@ -505,6 +519,12 @@ final class ASRService: ObservableObject {
     private var audioRouteRecoveryTask: Task<Void, Never>?
     private let audioRouteRecoveryDelayNanoseconds: UInt64 = 1_000_000_000
     private var isRecoveringAudioRoute = false
+    private let fastPreviewStopGraceNanoseconds: UInt64 = 200_000_000
+    private let fastPreviewSampleRate = 16_000
+    private let fastPreviewMinimumSamples = 32_000
+    private let fastPreviewTailAudioToleranceMs = 300
+    private let fastPreviewStopGraceMinimumCoverage = 0.72
+    private let fastPreviewStopGraceTargetCoverage = 0.88
 
     /// Tracks whether we paused system media for this recording session.
     /// Used to resume playback only if we were the ones who paused it.
@@ -515,7 +535,10 @@ final class ASRService: ObservableObject {
     private var lastAudioLevelSentAt: TimeInterval = 0
 
     private var streamingChunkDurationSeconds: Double {
-        SettingsStore.shared.selectedSpeechModel.streamingPreviewIntervalSeconds
+        if SettingsStore.shared.parakeetFinalizationMode == .tokenTimedChunkMerge {
+            return 0.4
+        }
+        return SettingsStore.shared.selectedSpeechModel.streamingPreviewIntervalSeconds
     }
 
     private var minimumStreamingPreviewSamples: Int {
@@ -766,10 +789,18 @@ final class ASRService: ObservableObject {
         self.lastProcessedSampleCount = 0
         self.isProcessingChunk = false
         self.skipNextChunk = false
+        self.benchmarkSessionID += 1
+        self.benchmarkRecordingStartedAt = Date().timeIntervalSince1970
+        self.benchmarkStreamingChunkIndex = 0
+        self.benchmarkCompletedStreamingChunks = 0
+        self.benchmarkLastChunkSampleCount = 0
         self.streamingChunkAnalyticsSuccessCount = 0
         self.lastStreamingChunkFailureAnalyticsAt = nil
+        (self.transcriptionProvider as? FluidAudioProvider)?.resetStreamingPreviewCache()
         self.audioCapturePipeline.setRecordingEnabled(true)
         self.refreshWordBoostStatus()
+        let dims = self.currentTranscriptionAnalyticsDimensions()
+        self.benchmarkLog("recording_start model=\(dims.model) provider=\(dims.provider) supportsStreaming=\(SettingsStore.shared.selectedSpeechModel.supportsStreaming)")
         DebugLogger.shared.debug("✅ Buffers cleared", source: "ASRService")
 
         self.isStarting = true
@@ -813,6 +844,7 @@ final class ASRService: ObservableObject {
             let model = SettingsStore.shared.selectedSpeechModel
             if model.supportsStreaming {
                 DebugLogger.shared.debug("📡 Starting streaming transcription...", source: "ASRService")
+                self.benchmarkLog("streaming_timer_start intervalMs=\(Int((self.streamingChunkDurationSeconds * 1000).rounded())) minSamples=\(self.minimumStreamingPreviewSamples)")
                 self.startStreamingTranscription()
             } else {
                 DebugLogger.shared.debug("⏸️ Skipping streaming - model '\(model.displayName)' does not support real-time chunk processing", source: "ASRService")
@@ -883,6 +915,8 @@ final class ASRService: ObservableObject {
     /// Check debug logs for detailed error information.
     func stop() async -> String {
         DebugLogger.shared.info("🛑 STOP() called - beginning shutdown sequence", source: "ASRService")
+        let stopStartedAt = Date().timeIntervalSince1970
+        self.benchmarkLog("stop_start ageMs=\(self.elapsedMilliseconds(since: self.benchmarkRecordingStartedAt)) bufferedSamples=\(self.audioBuffer.count)")
 
         guard self.isRunning else {
             DebugLogger.shared.warning("⚠️ STOP() - not running, returning empty string", source: "ASRService")
@@ -900,12 +934,16 @@ final class ASRService: ObservableObject {
 
         DebugLogger.shared.debug("📍 Preparing final transcription", source: "ASRService")
 
-        // CRITICAL: Set isRunning to false FIRST to signal any in-flight chunks to abort early
-        DebugLogger.shared.debug("🚫 Setting isRunning = false...", source: "ASRService")
-        self.isRunning = false
         DebugLogger.shared.debug("🚫 Setting audioCapturePipeline recording = false...", source: "ASRService")
         self.audioCapturePipeline.setRecordingEnabled(false)
-        DebugLogger.shared.debug("✅ isRunning and capture pipeline disabled", source: "ASRService")
+        DebugLogger.shared.debug("✅ Capture pipeline disabled", source: "ASRService")
+
+        await self.runFastPreviewStopGraceIfNeeded()
+
+        // CRITICAL: Set isRunning to false before teardown so in-flight chunks stop safely.
+        DebugLogger.shared.debug("🚫 Setting isRunning = false...", source: "ASRService")
+        self.isRunning = false
+        DebugLogger.shared.debug("✅ isRunning disabled", source: "ASRService")
 
         // Stop monitoring device to prevent callbacks after stop
         DebugLogger.shared.debug("👁️ Stopping device monitoring...", source: "ASRService")
@@ -931,7 +969,9 @@ final class ASRService: ObservableObject {
         // CRITICAL FIX: Await completion of streaming task AND any pending transcriptions
         // This prevents use-after-free crashes (EXC_BAD_ACCESS) when clearing buffer
         DebugLogger.shared.debug("⏳ Awaiting stopStreamingTimerAndAwait()...", source: "ASRService")
+        let streamingStopStartedAt = Date().timeIntervalSince1970
         await self.stopStreamingTimerAndAwait()
+        self.benchmarkLog("stop_streaming_wait elapsedMs=\(self.elapsedMilliseconds(since: streamingStopStartedAt))")
         DebugLogger.shared.debug("✅ stopStreamingTimerAndAwait() completed", source: "ASRService")
 
         self.isProcessingChunk = false
@@ -944,6 +984,7 @@ final class ASRService: ObservableObject {
         // Thread-safe copy of recorded audio
         var pcm = self.audioBuffer.getAll()
         self.audioBuffer.clear()
+        self.benchmarkLog("stop_audio_drained samples=\(pcm.count) audioMs=\(Int((Double(pcm.count) / 16_000.0 * 1000).rounded()))")
 
         // Drop recordings with no audio at all — nothing to transcribe.
         guard !pcm.isEmpty else {
@@ -959,6 +1000,7 @@ final class ASRService: ObservableObject {
                 await MediaPlaybackService.shared.resumeIfWePaused(true)
                 DebugLogger.shared.info("🎵 Resumed system media after empty audio", source: "ASRService")
             }
+            self.benchmarkLog("stop_end result=empty totalMs=\(self.elapsedMilliseconds(since: stopStartedAt)) reason=no_audio")
             return ""
         }
 
@@ -978,38 +1020,60 @@ final class ASRService: ObservableObject {
         }
 
         do {
-            DebugLogger.shared.debug("🔍 Calling ensureAsrReady()...", source: "ASRService")
-            try await self.ensureAsrReady()
-            DebugLogger.shared.debug("✅ ensureAsrReady() completed", source: "ASRService")
+            var provider = self.transcriptionProvider
+            let ensureStartedAt = Date().timeIntervalSince1970
+            if self.isAsrReady, provider.isReady {
+                self.benchmarkLog("stop_ensure_ready skipped=true elapsedMs=0")
+            } else {
+                DebugLogger.shared.debug("🔍 Calling ensureAsrReady()...", source: "ASRService")
+                try await self.ensureAsrReady()
+                provider = self.transcriptionProvider
+                self.benchmarkLog("stop_ensure_ready skipped=false elapsedMs=\(self.elapsedMilliseconds(since: ensureStartedAt))")
+                DebugLogger.shared.debug("✅ ensureAsrReady() completed", source: "ASRService")
+            }
 
-            guard self.transcriptionProvider.isReady else {
+            guard provider.isReady else {
                 DebugLogger.shared.error("Transcription provider is not ready", source: "ASRService")
                 // Resume media playback if we paused it
                 if shouldResumeMedia {
                     await MediaPlaybackService.shared.resumeIfWePaused(true)
                     DebugLogger.shared.info("🎵 Resumed system media after provider not ready", source: "ASRService")
                 }
+                self.benchmarkLog("stop_end result=empty totalMs=\(self.elapsedMilliseconds(since: stopStartedAt)) reason=provider_not_ready")
                 return ""
             }
 
             DebugLogger.shared.debug("Starting transcription with \(pcm.count) samples (\(Float(pcm.count) / 16_000.0) seconds)", source: "ASRService")
-            DebugLogger.shared.debug("stop(): starting full transcription (samples: \(pcm.count)) using \(self.transcriptionProvider.name)", source: "ASRService")
-            DebugLogger.shared.debug("📝 Starting transcription executor...", source: "ASRService")
-            let result = try await transcriptionExecutor.run { [provider = self.transcriptionProvider] in
-                DebugLogger.shared.debug("📝 Inside transcription executor closure", source: "ASRService")
-                let transcriptionResult = try await provider.transcribeFinal(pcm)
-                DebugLogger.shared.debug("📝 Transcription provider returned", source: "ASRService")
-                return transcriptionResult
+            let finalStartedAt = Date().timeIntervalSince1970
+            let result: ASRTranscriptionResult
+            let finalSource: String
+            if let fluidProvider = provider as? FluidAudioProvider,
+               let cachedResult = await fluidProvider.transcribeCachedStreamingPreviewIfAvailable(pcm)
+            {
+                result = cachedResult
+                finalSource = "livePreview"
+                self.benchmarkLog("final_fast_preview_bypass hit=true")
+            } else {
+                result = try await self.transcriptionExecutor.run { [provider] in
+                    try await provider.transcribeFinal(pcm)
+                }
+                finalSource = "full"
             }
-            DebugLogger.shared.debug("✅ Transcription executor completed", source: "ASRService")
-            DebugLogger.shared.debug("stop(): full transcription finished", source: "ASRService")
+            let finalElapsedMs = self.elapsedMilliseconds(since: finalStartedAt)
+            let finalAudioSeconds = Double(pcm.count) / 16_000.0
+            let finalRTF = finalAudioSeconds > 0 ? (Double(finalElapsedMs) / 1000.0) / finalAudioSeconds : 0
+            DebugLogger.shared.debug("stop(): final transcription finished source=\(finalSource)", source: "ASRService")
             DebugLogger.shared.debug(
                 "Transcription completed: '\(result.text)' (confidence: \(result.confidence))",
                 source: "ASRService"
             )
             DebugLogger.shared.info(
-                "Final ASR result | provider=\(self.transcriptionProvider.name) | samples=\(pcm.count) | textChars=\(result.text.trimmingCharacters(in: .whitespacesAndNewlines).count) | confidence=\(result.confidence)",
+                "Final ASR result | provider=\(provider.name) | samples=\(pcm.count) | textChars=\(result.text.trimmingCharacters(in: .whitespacesAndNewlines).count) | confidence=\(result.confidence)",
                 source: "ASRService"
+            )
+            self.benchmarkLog(
+                "final_done elapsedMs=\(finalElapsedMs) samples=\(pcm.count) audioMs=\(Int((finalAudioSeconds * 1000).rounded())) " +
+                    "textChars=\(result.text.trimmingCharacters(in: .whitespacesAndNewlines).count) rtf=\(String(format: "%.3f", finalRTF)) streamedChunks=\(self.benchmarkCompletedStreamingChunks) source=\(finalSource)"
             )
 
             // Mark first transcription as complete to clear loading state
@@ -1025,6 +1089,7 @@ final class ASRService: ObservableObject {
             let cleanedText = ASRService.applyCustomDictionary(ASRService.removeFillerWords(result.text))
             self.recordWordBoostHitIfAny(transcribedText: cleanedText)
             DebugLogger.shared.debug("After post-processing: '\(cleanedText)'", source: "ASRService")
+            self.benchmarkLog("stop_end result=success totalMs=\(self.elapsedMilliseconds(since: stopStartedAt)) recordingAgeMs=\(self.elapsedMilliseconds(since: self.benchmarkRecordingStartedAt)) cleanedChars=\(cleanedText.count)")
 
             // Resume media playback if we paused it
             if shouldResumeMedia {
@@ -1061,6 +1126,7 @@ final class ASRService: ObservableObject {
                 DebugLogger.shared.info("🎵 Resumed system media after transcription failure", source: "ASRService")
             }
 
+            self.benchmarkLog("stop_end result=error totalMs=\(self.elapsedMilliseconds(since: stopStartedAt)) error=\(error.localizedDescription)")
             return ""
         }
     }
@@ -2395,29 +2461,6 @@ final class ASRService: ObservableObject {
         }
     }
 
-    /// Stops the streaming timer and waits for the task to complete.
-    /// This prevents race conditions where the buffer is cleared while
-    /// a transcription task is still running.
-    private func stopStreamingTimerAndAwait() async {
-        guard let task = self.streamingTask else { return }
-        task.cancel()
-        // Wait for the task to actually finish - this is critical!
-        // The task may be in the middle of processStreamingChunk()
-        _ = await task.result
-        self.streamingTask = nil
-
-        // Also cancel and await any pending transcription in the executor
-        // This prevents use-after-free when we clear the buffer
-        await self.transcriptionExecutor.cancelAndAwaitPending()
-    }
-
-    /// Legacy sync version for cases where we can't await (e.g., stopWithoutTranscription)
-    /// WARNING: This can cause crashes if buffer is cleared immediately after!
-    private func stopStreamingTimer() {
-        self.streamingTask?.cancel()
-        self.streamingTask = nil
-    }
-
     @MainActor
     private func runStreamingLoop() async {
         DebugLogger.shared.debug("🔄 runStreamingLoop() - ENTERED", source: "ASRService")
@@ -2460,21 +2503,29 @@ final class ASRService: ObservableObject {
     @MainActor
     private func processStreamingChunk() async {
         guard self.isRunning else { return }
+        self.benchmarkStreamingChunkIndex += 1
+        let chunkIndex = self.benchmarkStreamingChunkIndex
+        let chunkAgeMs = self.elapsedMilliseconds(since: self.benchmarkRecordingStartedAt)
 
         // Skip if already processing to prevent queue buildup
         guard !self.isProcessingChunk else {
             DebugLogger.shared.debug("⚠️ Skipping chunk - previous transcription still in progress", source: "ASRService")
+            self.benchmarkLog("chunk_skip index=\(chunkIndex) reason=busy ageMs=\(chunkAgeMs)")
             self.skipNextChunk = true
             return
         }
 
         if self.skipNextChunk {
             DebugLogger.shared.debug("⚠️ Skipping chunk for ANE recovery", source: "ASRService")
+            self.benchmarkLog("chunk_skip index=\(chunkIndex) reason=recovery ageMs=\(chunkAgeMs)")
             self.skipNextChunk = false
             return
         }
 
-        guard self.isAsrReady, self.transcriptionProvider.isReady else { return }
+        guard self.isAsrReady, self.transcriptionProvider.isReady else {
+            self.benchmarkLog("chunk_skip index=\(chunkIndex) reason=not_ready ageMs=\(chunkAgeMs) isAsrReady=\(self.isAsrReady) providerReady=\(self.transcriptionProvider.isReady)")
+            return
+        }
 
         // Thread-safe count check
         let currentSampleCount = self.audioBuffer.count
@@ -2487,6 +2538,7 @@ final class ASRService: ObservableObject {
                     "Waiting for more audio data (\(currentSampleCount)/\(minSamples) samples)",
                     source: "ASRService"
                 )
+                self.benchmarkLog("chunk_wait index=\(chunkIndex) ageMs=\(chunkAgeMs) samples=\(currentSampleCount) minSamples=\(minSamples)")
             }
             return
         }
@@ -2497,6 +2549,7 @@ final class ASRService: ObservableObject {
         // Validate chunk is not empty (defensive check)
         guard !chunk.isEmpty else {
             DebugLogger.shared.warning("Audio buffer returned empty chunk despite count > 0. Skipping transcription.", source: "ASRService")
+            self.benchmarkLog("chunk_skip index=\(chunkIndex) reason=empty ageMs=\(chunkAgeMs)")
             return
         }
 
@@ -2504,6 +2557,10 @@ final class ASRService: ObservableObject {
         defer { isProcessingChunk = false }
 
         let startTime = Date()
+        let startedAt = startTime.timeIntervalSince1970
+        let newSamples = max(0, chunk.count - self.benchmarkLastChunkSampleCount)
+        self.benchmarkLastChunkSampleCount = chunk.count
+        self.benchmarkLog("chunk_start index=\(chunkIndex) ageMs=\(chunkAgeMs) samples=\(chunk.count) newSamples=\(newSamples) audioMs=\(Int((Double(chunk.count) / 16_000.0 * 1000).rounded())) provider=\(self.transcriptionProvider.name)")
 
         do {
             DebugLogger.shared.debug("Streaming chunk starting transcription (samples: \(chunk.count)) using \(self.transcriptionProvider.name)", source: "ASRService")
@@ -2525,6 +2582,8 @@ final class ASRService: ObservableObject {
             let rawText = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
             let newText = ASRService.applyCustomDictionary(ASRService.removeFillerWords(rawText))
             self.recordWordBoostHitIfAny(transcribedText: newText)
+            self.benchmarkCompletedStreamingChunks += 1
+            self.lastProcessedSampleCount = chunk.count
 
             // Mark first transcription as complete to clear loading state
             if !self.hasCompletedFirstTranscription {
@@ -2543,6 +2602,12 @@ final class ASRService: ObservableObject {
 
                 DebugLogger.shared.debug("✅ Streaming: '\(updatedText)' (\(String(format: "%.2f", duration))s)", source: "ASRService")
             }
+            let rtf = chunk.isEmpty ? 0 : duration / (Double(chunk.count) / 16_000.0)
+            let chunkDoneAgeMs = self.elapsedMilliseconds(since: self.benchmarkRecordingStartedAt)
+            self.benchmarkLog(
+                "chunk_done index=\(chunkIndex) elapsedMs=\(self.elapsedMilliseconds(since: startedAt)) ageMs=\(chunkDoneAgeMs) " +
+                    "samples=\(chunk.count) rawChars=\(rawText.count) cleanedChars=\(newText.count) rtf=\(String(format: "%.3f", rtf))"
+            )
 
             // If transcription takes longer than the interval, skip next to prevent queue buildup
             // This allows slower machines to still work without overwhelming the system
@@ -2563,6 +2628,7 @@ final class ASRService: ObservableObject {
                 error: error
             )
             DebugLogger.shared.error("❌ Streaming failed: \(error)", source: "ASRService")
+            self.benchmarkLog("chunk_fail index=\(chunkIndex) elapsedMs=\(self.elapsedMilliseconds(since: startedAt)) samples=\(chunk.count) error=\(error.localizedDescription)")
             self.skipNextChunk = true
         }
     }
@@ -2715,6 +2781,72 @@ final class ASRService: ObservableObject {
         }
 
         return result
+    }
+}
+
+private extension ASRService {
+    /// Stops the streaming timer and waits for the task to complete.
+    /// This prevents race conditions where the buffer is cleared while
+    /// a transcription task is still running.
+    func stopStreamingTimerAndAwait() async {
+        guard let task = self.streamingTask else {
+            self.benchmarkLog("streaming_timer_stop no_task=true")
+            return
+        }
+        let startedAt = Date().timeIntervalSince1970
+        self.benchmarkLog("streaming_timer_stop begin")
+        task.cancel()
+        // Wait for the task to actually finish - this is critical!
+        // The task may be in the middle of processStreamingChunk()
+        _ = await task.result
+        self.streamingTask = nil
+        self.benchmarkLog("streaming_timer_stop end elapsedMs=\(self.elapsedMilliseconds(since: startedAt)) completedChunks=\(self.benchmarkCompletedStreamingChunks)")
+    }
+
+    /// Legacy sync version for cases where we can't await (e.g., stopWithoutTranscription)
+    /// WARNING: This can cause crashes if buffer is cleared immediately after!
+    func stopStreamingTimer() {
+        self.streamingTask?.cancel()
+        self.streamingTask = nil
+    }
+
+    func runFastPreviewStopGraceIfNeeded() async {
+        guard SettingsStore.shared.parakeetFinalizationMode == .tokenTimedChunkMerge else { return }
+        guard SettingsStore.shared.selectedSpeechModel.supportsStreaming else { return }
+        guard self.transcriptionProvider is FluidAudioProvider else { return }
+
+        let currentSampleCount = self.audioBuffer.count
+        guard currentSampleCount >= self.fastPreviewMinimumSamples else {
+            self.benchmarkLog("fast_preview_stop_grace skipped=true reason=duration samples=\(currentSampleCount)")
+            return
+        }
+
+        let processedSampleCount = min(self.lastProcessedSampleCount, currentSampleCount)
+        let coverage = currentSampleCount > 0 ? Double(processedSampleCount) / Double(currentSampleCount) : 0
+        let tailSamples = max(0, currentSampleCount - processedSampleCount)
+        let tailMs = Int((Double(tailSamples) / Double(self.fastPreviewSampleRate) * 1000).rounded())
+        guard coverage < self.fastPreviewStopGraceTargetCoverage || tailMs > self.fastPreviewTailAudioToleranceMs else {
+            self.benchmarkLog(
+                "fast_preview_stop_grace skipped=true reason=already_covered coverage=\(String(format: "%.3f", coverage)) tailMs=\(tailMs)"
+            )
+            return
+        }
+
+        if self.isProcessingChunk {
+            self.benchmarkLog("fast_preview_stop_grace wait=in_flight coverage=\(String(format: "%.3f", coverage)) tailMs=\(tailMs)")
+            try? await Task.sleep(nanoseconds: self.fastPreviewStopGraceNanoseconds)
+            return
+        }
+
+        guard processedSampleCount > 0, coverage >= self.fastPreviewStopGraceMinimumCoverage else {
+            self.benchmarkLog("fast_preview_stop_grace skipped=true reason=not_close coverage=\(String(format: "%.3f", coverage)) tailMs=\(tailMs)")
+            return
+        }
+
+        let startedAt = Date().timeIntervalSince1970
+        self.benchmarkLog("fast_preview_stop_grace forced_chunk=true coverage=\(String(format: "%.3f", coverage)) tailMs=\(tailMs) samples=\(currentSampleCount)")
+        await self.processStreamingChunk()
+        self.benchmarkLog("fast_preview_stop_grace done elapsedMs=\(self.elapsedMilliseconds(since: startedAt)) samples=\(self.audioBuffer.count)")
     }
 }
 
