@@ -1824,7 +1824,6 @@ struct ContentView: View {
             "Routing decision snapshot | activeMode=\(modeAtStop.rawValue) | rewrite=\(wasRewriteMode) | command=\(wasCommandMode) | overlay=\(NotchContentState.shared.mode.rawValue)",
             source: "ContentView"
         )
-        TranscriptionSoundPlayer.shared.playStopSound()
 
         self.clearActiveRecordingMode()
 
@@ -1843,6 +1842,7 @@ struct ContentView: View {
         // The processing indicator will stay visible during this phase
         let transcribedText = await asr.stop()
         let audioSnapshot = self.asr.consumeLastCompletedAudioSnapshot()
+        TranscriptionSoundPlayer.shared.playStopSound()
         DebugLogger.shared.info(
             "Stop transcription result | chars=\(transcribedText.count) | empty=\(transcribedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)",
             source: "ContentView"
