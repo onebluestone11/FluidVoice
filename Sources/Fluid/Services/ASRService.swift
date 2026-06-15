@@ -2772,21 +2772,22 @@ final class ASRService: ObservableObject {
     private let typingService = TypingService() // Reuse instance to avoid conflicts
 
     func typeTextToActiveField(_ text: String) {
-        DebugLogger.shared.benchmark("TYPING_BENCH", message: "asr_type_request chars=\(text.count) preferredPID=nil", source: "TypingBenchmark")
-        self.typingService.typeTextInstantly(text)
-        DebugLogger.shared.benchmark("TYPING_BENCH", message: "asr_type_dispatched chars=\(text.count) preferredPID=nil", source: "TypingBenchmark")
+        self.typeTextToActiveField(text, preferredTargetPID: nil, textReadyAt: nil)
     }
 
-    func typeTextToActiveField(_ text: String, preferredTargetPID: pid_t?) {
+    func typeTextToActiveField(_ text: String, preferredTargetPID: pid_t?, textReadyAt: TimeInterval? = nil) {
+        let requestedAt = ProcessInfo.processInfo.systemUptime
+        let textReadyAge = textReadyAt.map { Int(((requestedAt - $0) * 1000).rounded()) }
         DebugLogger.shared.benchmark(
             "TYPING_BENCH",
-            message: "asr_type_request chars=\(text.count) preferredPID=\(preferredTargetPID.map { String($0) } ?? "nil")",
+            message: "asr_type_request chars=\(text.count) preferredPID=\(preferredTargetPID.map { String($0) } ?? "nil") textReadyAgeMs=\(textReadyAge.map { String($0) } ?? "nil")",
             source: "TypingBenchmark"
         )
-        self.typingService.typeTextInstantly(text, preferredTargetPID: preferredTargetPID)
+        self.typingService.typeTextInstantly(text, preferredTargetPID: preferredTargetPID, textReadyAt: textReadyAt)
+        let dispatchedAt = ProcessInfo.processInfo.systemUptime
         DebugLogger.shared.benchmark(
             "TYPING_BENCH",
-            message: "asr_type_dispatched chars=\(text.count) preferredPID=\(preferredTargetPID.map { String($0) } ?? "nil")",
+            message: "asr_type_dispatched chars=\(text.count) preferredPID=\(preferredTargetPID.map { String($0) } ?? "nil") textReadyToDispatchMs=\(textReadyAt.map { String(Int(((dispatchedAt - $0) * 1000).rounded())) } ?? "nil")",
             source: "TypingBenchmark"
         )
     }

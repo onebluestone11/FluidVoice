@@ -45,7 +45,8 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
     private var pendingShowOperation: DispatchWorkItem?
     private var pendingHideOperation: DispatchWorkItem?
     private var pendingProcessingShowOperation: DispatchWorkItem?
-    private let processingVisualDelay: DispatchTimeInterval = .milliseconds(100)
+    private let processingVisualDelay: DispatchTimeInterval = .milliseconds(0)
+    private let processingHideDelay: DispatchTimeInterval = .milliseconds(0)
 
     // Subscription for forwarding audio levels to expanded command notch
     private var expandedModeAudioSubscription: AnyCancellable?
@@ -209,6 +210,46 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
         }
     }
 
+    func showRecordingOverlayImmediately() {
+        guard let asrService else {
+            self.overlayBench("instant_show_return reason=no_asr_service")
+            return
+        }
+
+        self.pendingHideOperation?.cancel()
+        self.pendingHideOperation = nil
+        self.pendingShowOperation?.cancel()
+        self.pendingShowOperation = nil
+
+        guard !self.overlayVisible else {
+            self.overlayBench("instant_show_return reason=already_visible")
+            return
+        }
+
+        self.overlayVisible = true
+        self.overlayBench("instant_show_request mode=\(self.currentOverlayMode.rawValue)")
+
+        if NotchOverlayManager.shared.isCommandOutputExpanded {
+            if self.currentOverlayMode == .command, NotchOverlayManager.shared.supportsCommandNotchUI {
+                NotchContentState.shared.setRecordingInExpandedMode(true)
+                self.expandedModeAudioSubscription = asrService.audioLevelPublisher
+                    .receive(on: DispatchQueue.main)
+                    .sink { level in
+                        NotchContentState.shared.updateExpandedModeAudioLevel(level)
+                    }
+                return
+            }
+            NotchOverlayManager.shared.hideExpandedCommandOutput()
+        }
+
+        self.overlayBench("show_workitem_execute mode=\(self.currentOverlayMode.rawValue)")
+        NotchOverlayManager.shared.show(
+            audioLevelPublisher: asrService.audioLevelPublisher,
+            mode: self.currentOverlayMode
+        )
+        self.overlayBench("show_workitem_return mode=\(self.currentOverlayMode.rawValue)")
+    }
+
     // MARK: - Public API for overlay management
 
     func updateOverlayTranscription(_ text: String) {
@@ -236,7 +277,7 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
 
             let showItem = DispatchWorkItem { [weak self] in
                 guard let self = self, self.isProcessingActive else { return }
-                self.overlayBench("processing_show_workitem_execute delayMs=100")
+                self.overlayBench("processing_show_workitem_execute delayMs=0")
                 NotchOverlayManager.shared.setProcessing(true)
                 self.overlayBench("processing_show_workitem_return")
                 self.pendingProcessingShowOperation = nil
@@ -266,15 +307,15 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
                     return
                 }
 
-                self.overlayBench("processing_hide_workitem_execute delayMs=100")
+                self.overlayBench("processing_hide_workitem_execute delayMs=0")
                 NotchOverlayManager.shared.hide()
                 self.overlayBench("processing_hide_workitem_return")
                 self.pendingHideOperation = nil
             }
             self.pendingHideOperation = hideItem
-            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(100), execute: hideItem)
+            DispatchQueue.main.asyncAfter(deadline: .now() + self.processingHideDelay, execute: hideItem)
             NotchOverlayManager.shared.setProcessing(false)
-            self.overlayBench("processing_forwarded processing=false hideDelayMs=100")
+            self.overlayBench("processing_forwarded processing=false hideDelayMs=0")
             return
         }
     }

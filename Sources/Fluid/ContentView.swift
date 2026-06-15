@@ -2019,7 +2019,9 @@ struct ContentView: View {
         self.asr.finalText = finalText
 
         DebugLogger.shared.info("Transcription finalized (chars: \(finalText.count))", source: "ContentView")
+        let finalTextReadyAt = ProcessInfo.processInfo.systemUptime
         self.appBench("transcription_finalized chars=\(finalText.count)")
+        self.appBench("text_ready chars=\(finalText.count)")
 
         AnalyticsService.shared.capture(
             .transcriptionCompleted,
@@ -2105,9 +2107,13 @@ struct ContentView: View {
             if typingTarget.shouldRestoreOriginalFocus {
                 await self.restoreFocusToRecordingTarget()
             }
+            self.appBench(
+                "text_ready_to_type_request elapsedMs=\(Int(((ProcessInfo.processInfo.systemUptime - finalTextReadyAt) * 1000).rounded()))"
+            )
             self.asr.typeTextToActiveField(
                 finalText,
-                preferredTargetPID: typingTarget.pid
+                preferredTargetPID: typingTarget.pid,
+                textReadyAt: finalTextReadyAt
             )
             didTypeExternally = true
         }
@@ -2577,6 +2583,7 @@ struct ContentView: View {
         // Ensure normal dictation mode is set (command/rewrite modes set their own)
         if !self.isRecordingForCommand, !self.isRecordingForRewrite {
             self.menuBarManager.setOverlayMode(.dictation)
+            self.menuBarManager.showRecordingOverlayImmediately()
         }
 
         if !self.isRecordingForCommand, !self.isRecordingForRewrite {
@@ -2621,11 +2628,20 @@ struct ContentView: View {
     }
 
     /// Best-effort: re-activate the app that was focused when recording started.
-    /// Adds a short delay after activation so macOS can deliver focus before typing begins.
+    /// Skips the AX restore work when the captured text element is already focused.
     private func restoreFocusToRecordingTarget() async {
         guard let pid = NotchContentState.shared.recordingTargetPID else { return }
         let startedAt = ProcessInfo.processInfo.systemUptime
         self.appBench("focus_restore_start targetPID=\(pid)")
+        if TypingService.isCapturedFocusStillActive(for: pid) {
+            self.appBench("focus_restore_result activated=false element=true elapsedMs=0 reason=already_focused")
+            DebugLogger.shared.debug(
+                "Restore focus skipped; captured element still focused, targetPID: \(pid)",
+                source: "ContentView"
+            )
+            self.appBench("focus_restore_settle_done delayMs=0")
+            return
+        }
         let activated = TypingService.activateApp(pid: pid)
         let focusedElementRestored = TypingService.restoreCapturedFocus(in: pid)
         self.appBench(
@@ -2635,12 +2651,7 @@ struct ContentView: View {
             "Restore focus -> appActivated: \(activated), elementFocusRestored: \(focusedElementRestored), targetPID: \(pid)",
             source: "ContentView"
         )
-        if activated {
-            // Small delay to allow focus to settle before typing events fire.
-            let settleNanos: UInt64 = 10_000_000
-            try? await Task.sleep(nanoseconds: settleNanos)
-            self.appBench("focus_restore_settle_done delayMs=10")
-        }
+        self.appBench("focus_restore_settle_done delayMs=0")
     }
 
     // MARK: - ASR Model Management
@@ -3143,6 +3154,7 @@ extension ContentView {
         self.rewriteModeService.clearState()
         self.appBench("overlay_mode_request mode=Dictation")
         self.menuBarManager.setOverlayMode(.dictation)
+        self.menuBarManager.showRecordingOverlayImmediately()
         self.appBench("overlay_mode_requested mode=Dictation")
         self.prewarmPrivateAIDictationIfNeeded(for: slot)
 

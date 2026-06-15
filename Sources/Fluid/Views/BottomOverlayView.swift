@@ -91,21 +91,11 @@ final class BottomOverlayWindowController {
         self.targetScreen = OverlayScreenResolver.screenForCurrentPointer()
         self.positionWindow()
 
-        // Show with animation
-        self.window?.alphaValue = 0
+        // Show immediately; ASR startup can delay AppKit animation completions.
+        self.window?.alphaValue = 1
         self.window?.orderFrontRegardless()
         Self.overlayBench("bottom_order_front elapsedMs=\(Self.elapsedMs(since: startedAt))")
-
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.25
-            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            self.window?.animator().alphaValue = 1
-        } completionHandler: {
-            let elapsedMs = Int(((ProcessInfo.processInfo.systemUptime - startedAt) * 1000).rounded())
-            Task { @MainActor in
-                Self.overlayBench("bottom_fade_complete elapsedMs=\(elapsedMs)")
-            }
-        }
+        Self.overlayBench("bottom_fade_complete elapsedMs=\(Self.elapsedMs(since: startedAt))")
     }
 
     func hide() {
@@ -140,21 +130,11 @@ final class BottomOverlayWindowController {
         NotchContentState.shared.setBottomOverlayDismissOffsetY(28)
         NotchContentState.shared.setBottomOverlayDismissing(true)
 
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.2
-            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
-            window.animator().alphaValue = 0
-        } completionHandler: {
-            window.orderOut(nil)
-            let elapsedMs = Int(((ProcessInfo.processInfo.systemUptime - startedAt) * 1000).rounded())
-            Task { @MainActor in
-                Self.overlayBench("bottom_hide_complete elapsedMs=\(elapsedMs)")
-            }
-            Task { @MainActor in
-                self.endReleaseTransition(flushDeferredUpdate: false)
-                NotchContentState.shared.setBottomOverlayDismissing(false)
-            }
-        }
+        window.alphaValue = 0
+        window.orderOut(nil)
+        self.endReleaseTransition(flushDeferredUpdate: false)
+        NotchContentState.shared.setBottomOverlayDismissing(false)
+        Self.overlayBench("bottom_hide_complete elapsedMs=\(Self.elapsedMs(since: startedAt))")
     }
 
     func setProcessing(_ processing: Bool) {
