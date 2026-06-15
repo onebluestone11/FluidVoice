@@ -542,9 +542,10 @@ extension AIEnhancementSettingsView {
         let isLoading = self.privateAILoadState.isLoading(model.id)
         let isLoaded = self.privateAILoadState.isLoaded(model.id)
         let hasLoadFailure = self.privateAILoadState.failureMessage(for: model.id) != nil
+        let isVerified = self.isPrivateAIModelVerified(model)
         let isTesting = self.viewModel.isTestingConnection && self.viewModel.selectedProviderID == PrivateAIProviderFeature.shared.providerID
         let isBusy = isDownloading || isLoading || isTesting
-        let canVerify = isInstalled && !self.privateAISelectedModelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let canVerify = isInstalled && (!isVerified || hasLoadFailure) && !self.privateAISelectedModelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 
         return VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
@@ -570,7 +571,7 @@ extension AIEnhancementSettingsView {
                 .help("Open downloaded model folder")
             }
 
-            if isDownloading || isLoading || isLoaded || hasLoadFailure || !isInstalled {
+            if isDownloading || isLoading || isLoaded || hasLoadFailure || isVerified || !isInstalled {
                 self.privateAIModelStatusRow(
                     status: status,
                     progress: downloadProgress,
@@ -599,7 +600,31 @@ extension AIEnhancementSettingsView {
                 )
             }
 
-            if canVerify {
+            if !isInstalled {
+                if model.canDownload {
+                    Button(action: { self.downloadPrivateAIModel(model) }) {
+                        HStack(spacing: 6) {
+                            if isDownloading {
+                                ProgressView()
+                                    .controlSize(.mini)
+                                    .fixedSize()
+                            }
+                            Text(isDownloading ? Self.downloadButtonText(progress: downloadProgress) : "Download & Verify")
+                                .font(.system(size: 13, weight: .semibold))
+                        }
+                    }
+                    .buttonStyle(AccentButtonStyle(compact: true))
+                    .disabled(isBusy)
+                } else {
+                    HStack(spacing: 6) {
+                        Image(systemName: "info.circle")
+                            .font(.caption)
+                        Text("Install the selected model to enable verification")
+                            .font(.caption)
+                    }
+                    .foregroundStyle(.secondary)
+                }
+            } else if canVerify {
                 Button(action: { self.verifyPrivateAIConnection(model) }) {
                     HStack(spacing: 6) {
                         if isTesting {
@@ -613,28 +638,6 @@ extension AIEnhancementSettingsView {
                 }
                 .buttonStyle(AccentButtonStyle(compact: true))
                 .disabled(isBusy)
-            } else if model.canDownload {
-                Button(action: { self.downloadPrivateAIModel(model) }) {
-                    HStack(spacing: 6) {
-                        if isDownloading {
-                            ProgressView()
-                                .controlSize(.mini)
-                                .fixedSize()
-                        }
-                        Text(isDownloading ? Self.downloadButtonText(progress: downloadProgress) : "Download & Verify")
-                            .font(.system(size: 13, weight: .semibold))
-                    }
-                }
-                .buttonStyle(AccentButtonStyle(compact: true))
-                .disabled(isBusy)
-            } else {
-                HStack(spacing: 6) {
-                    Image(systemName: "info.circle")
-                        .font(.caption)
-                    Text("Install the selected model to enable verification")
-                        .font(.caption)
-                }
-                .foregroundStyle(.secondary)
             }
         }
     }
@@ -817,6 +820,12 @@ extension AIEnhancementSettingsView {
         PrivateAIModelRegistry.model(id: self.privateAISelectedModelID) ?? PrivateAIModelRegistry.defaultModel
     }
 
+    private func isPrivateAIModelVerified(_ model: PrivateAIRegisteredModel) -> Bool {
+        guard PrivateAIIntegrationService.isModelInstalled(model) else { return false }
+        let key = self.viewModel.providerKey(for: PrivateAIProviderFeature.shared.providerID)
+        return self.viewModel.settings.verifiedProviderFingerprints[key] == PrivateAIProviderFeature.verificationFingerprint(for: model.id)
+    }
+
     private func privateAIModelStatus(
         for model: PrivateAIRegisteredModel
     ) -> PrivateAIProviderModelStatus {
@@ -836,7 +845,7 @@ extension AIEnhancementSettingsView {
 
         if self.privateAILoadState.isLoaded(model.id) {
             return PrivateAIProviderModelStatus(
-                detail: "Ready.",
+                detail: "Ready. Supports dictation mode only.",
                 color: Color.fluidGreen
             )
         }
@@ -845,6 +854,13 @@ extension AIEnhancementSettingsView {
             return PrivateAIProviderModelStatus(
                 detail: message,
                 color: .red
+            )
+        }
+
+        if self.isPrivateAIModelVerified(model) {
+            return PrivateAIProviderModelStatus(
+                detail: "Ready. Supports dictation mode only.",
+                color: Color.fluidGreen
             )
         }
 
@@ -1354,6 +1370,7 @@ extension AIEnhancementSettingsView {
         let isFluidLoading = self.privateAILoadState.isLoading(fluidModel.id)
         let isFluidLoaded = self.privateAILoadState.isLoaded(fluidModel.id)
         let hasFluidLoadFailure = self.privateAILoadState.failureMessage(for: fluidModel.id) != nil
+        let isFluidVerified = self.isPrivateAIModelVerified(fluidModel)
         let isFluidTesting = self.viewModel.isTestingConnection && self.viewModel.selectedProviderID == PrivateAIProviderFeature.shared.providerID
         let isFluidBusy = isFluidDownloading || isFluidLoading || isFluidTesting
         let isRefreshing = self.viewModel.isFetchingModels && self.viewModel.selectedProviderID == item.id
@@ -1432,7 +1449,7 @@ extension AIEnhancementSettingsView {
                         .buttonStyle(AccentButtonStyle(compact: true))
                         .disabled(!fluidModel.canDownload || isFluidBusy)
                         .help(fluidModel.canDownload ? "Download and verify selected model" : "Download URL is not configured yet")
-                    } else if !isFluidLoaded {
+                    } else if !isFluidVerified || hasFluidLoadFailure {
                         Button(action: { self.verifyPrivateAIConnection(fluidModel) }) {
                             HStack(spacing: 5) {
                                 if isFluidLoading || isFluidTesting {
@@ -1473,7 +1490,7 @@ extension AIEnhancementSettingsView {
                 }
             }
 
-            if isPrivateAIProvider, isFluidDownloading || isFluidLoading || isFluidLoaded || hasFluidLoadFailure || !isFluidInstalled {
+            if isPrivateAIProvider, isFluidDownloading || isFluidLoading || isFluidLoaded || hasFluidLoadFailure || isFluidVerified || !isFluidInstalled {
                 self.privateAIModelStatusRow(
                     status: fluidStatus,
                     progress: fluidDownloadProgress,

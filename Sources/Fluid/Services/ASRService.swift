@@ -280,7 +280,7 @@ final class ASRService: ObservableObject {
     }
 
     private func benchmarkLog(_ message: String) {
-        DebugLogger.shared.info("ASR_BENCH session=\(self.benchmarkSessionID) \(message)", source: "ASRBenchmark")
+        DebugLogger.shared.benchmark("ASR_BENCH", message: "session=\(self.benchmarkSessionID) \(message)", source: "ASRBenchmark")
     }
 
     private func streamingChunkErrorCategory(for error: Error) -> String {
@@ -2772,11 +2772,23 @@ final class ASRService: ObservableObject {
     private let typingService = TypingService() // Reuse instance to avoid conflicts
 
     func typeTextToActiveField(_ text: String) {
+        DebugLogger.shared.benchmark("TYPING_BENCH", message: "asr_type_request chars=\(text.count) preferredPID=nil", source: "TypingBenchmark")
         self.typingService.typeTextInstantly(text)
+        DebugLogger.shared.benchmark("TYPING_BENCH", message: "asr_type_dispatched chars=\(text.count) preferredPID=nil", source: "TypingBenchmark")
     }
 
     func typeTextToActiveField(_ text: String, preferredTargetPID: pid_t?) {
+        DebugLogger.shared.benchmark(
+            "TYPING_BENCH",
+            message: "asr_type_request chars=\(text.count) preferredPID=\(preferredTargetPID.map { String($0) } ?? "nil")",
+            source: "TypingBenchmark"
+        )
         self.typingService.typeTextInstantly(text, preferredTargetPID: preferredTargetPID)
+        DebugLogger.shared.benchmark(
+            "TYPING_BENCH",
+            message: "asr_type_dispatched chars=\(text.count) preferredPID=\(preferredTargetPID.map { String($0) } ?? "nil")",
+            source: "TypingBenchmark"
+        )
     }
 
     /// Removes filler sounds from transcribed text

@@ -16,13 +16,19 @@ import SwiftUI
 // MARK: - AI Processing Errors
 
 enum AIProcessingError: LocalizedError {
+    case noVerifiedProvider
     case missingAPIKey(provider: String)
+    case missingModel(provider: String)
     case emptyResponse
 
     var errorDescription: String? {
         switch self {
+        case .noVerifiedProvider:
+            return "No verified AI provider selected"
         case let .missingAPIKey(provider):
             return "API key not set for \(provider)"
+        case let .missingModel(provider):
+            return "No model selected for \(provider)"
         case .emptyResponse:
             return "AI returned an empty response"
         }
@@ -167,7 +173,7 @@ struct ContentView: View {
     @State private var aiInputText: String = ""
     @State private var aiOutputText: String = ""
     @State private var isCallingAI: Bool = false
-    @State private var openAIBaseURL: String = ModelRepository.shared.defaultBaseURL(for: "openai")
+    @State private var openAIBaseURL: String = ""
 
     @State private var enableDebugLogs: Bool = SettingsStore.shared.enableDebugLogs
     @State private var hotkeyMode: HotkeyActivationMode = SettingsStore.shared.hotkeyMode
@@ -192,8 +198,8 @@ struct ContentView: View {
     // Models scoped by provider (name -> [models])
     @State private var availableModelsByProvider: [String: [String]] = [:]
     @State private var selectedModelByProvider: [String: String] = [:]
-    @State private var availableModels: [String] = ["gpt-4.1"] // derived from currentProvider
-    @State private var selectedModel: String = "gpt-4.1" // derived from currentProvider
+    @State private var availableModels: [String] = [] // derived from currentProvider
+    @State private var selectedModel: String = "" // derived from currentProvider
     @State private var showingAddModel: Bool = false
     @State private var newModelName: String = ""
 
@@ -206,7 +212,7 @@ struct ContentView: View {
     // MARK: - Provider Management
 
     @State private var providerAPIKeys: [String: String] = [:] // [providerKey: apiKey]
-    @State private var currentProvider: String = "openai" // canonical key: "openai" | "groq" | "custom:<id>"
+    @State private var currentProvider: String = "" // canonical key: "openai" | "groq" | "custom:<id>"
 
     @State private var savedProviders: [SettingsStore.SavedProvider] = []
     @State private var selectedProviderID: String = SettingsStore.shared.selectedProviderID
@@ -1334,11 +1340,14 @@ struct ContentView: View {
     // MARK: - Provider Management Functions
 
     private func providerKey(for providerID: String) -> String {
+        let trimmed = providerID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+
         // Built-in providers use their ID directly
-        if ModelRepository.shared.isBuiltIn(providerID) { return providerID }
+        if ModelRepository.shared.isBuiltIn(trimmed) { return trimmed }
         // Saved providers use their stable id with "custom:" prefix (if not already present)
-        if providerID.hasPrefix("custom:") { return providerID }
-        return providerID.isEmpty ? self.currentProvider : "custom:\(providerID)"
+        if trimmed.hasPrefix("custom:") { return trimmed }
+        return "custom:\(trimmed)"
     }
 
     private func updateCurrentProvider() {
@@ -1569,6 +1578,15 @@ struct ContentView: View {
             derivedCurrentProvider = currentSelectedProviderID
             derivedBaseURL = ""
             derivedSelectedModel = storedSelectedModelByProvider[currentSelectedProviderID] ?? ""
+        }
+
+        guard !derivedCurrentProvider.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw AIProcessingError.noVerifiedProvider
+        }
+        if currentSelectedProviderID != "apple-intelligence",
+           derivedSelectedModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+            throw AIProcessingError.missingModel(provider: derivedCurrentProvider)
         }
 
         DebugLogger.shared.debug("processTextWithAI using provider=\(derivedCurrentProvider), model=\(derivedSelectedModel)", source: "ContentView")
@@ -1813,6 +1831,7 @@ struct ContentView: View {
     private func stopAndProcessTranscription(route: DictationOutputRoute = .normal) async {
         DebugLogger.shared.debug("stopAndProcessTranscription called", source: "ContentView")
         DebugLogger.shared.info("Output route selected: \(route.rawValue)", source: "ContentView")
+        self.appBench("stop_path_enter route=\(route.rawValue)")
 
         // Check if we're in rewrite or command mode
         let modeAtStop = self.activeRecordingMode
@@ -1831,8 +1850,10 @@ struct ContentView: View {
         // The asr.stop() call performs the final transcription which can take a moment
         // (especially for slower models like Whisper Medium/Large).
         DebugLogger.shared.debug("Showing transcription processing state", source: "ContentView")
+        self.appBench("processing_ui_request status=Transcribing")
         self.menuBarManager.setProcessing(true)
         NotchOverlayManager.shared.updateTranscriptionText("Transcribing")
+        self.appBench("processing_ui_requested status=Transcribing")
 
         // Give SwiftUI a chance to render the processing state before we do heavier work
         // (ASR finalization + optional AI post-processing).
@@ -1840,7 +1861,10 @@ struct ContentView: View {
 
         // Stop the ASR service and wait for transcription to complete
         // The processing indicator will stay visible during this phase
+        let asrStopStartedAt = ProcessInfo.processInfo.systemUptime
+        self.appBench("asr_stop_call")
         let transcribedText = await asr.stop()
+        self.appBench("asr_stop_return elapsedMs=\(Int(((ProcessInfo.processInfo.systemUptime - asrStopStartedAt) * 1000).rounded()))")
         let audioSnapshot = self.asr.consumeLastCompletedAudioSnapshot()
         TranscriptionSoundPlayer.shared.playStopSound()
         DebugLogger.shared.info(
@@ -1940,7 +1964,9 @@ struct ContentView: View {
             let postProcessingStart = Date()
 
             // Update overlay text to show we're now refining (processing already true)
+            self.appBench("processing_ui_request status=Refining")
             NotchOverlayManager.shared.updateTranscriptionText("Refining")
+            self.appBench("processing_ui_requested status=Refining")
 
             // Ensure the status label becomes visible immediately.
             await Task.yield()
@@ -1993,6 +2019,7 @@ struct ContentView: View {
         self.asr.finalText = finalText
 
         DebugLogger.shared.info("Transcription finalized (chars: \(finalText.count))", source: "ContentView")
+        self.appBench("transcription_finalized chars=\(finalText.count)")
 
         AnalyticsService.shared.capture(
             .transcriptionCompleted,
@@ -2597,8 +2624,13 @@ struct ContentView: View {
     /// Adds a short delay after activation so macOS can deliver focus before typing begins.
     private func restoreFocusToRecordingTarget() async {
         guard let pid = NotchContentState.shared.recordingTargetPID else { return }
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        self.appBench("focus_restore_start targetPID=\(pid)")
         let activated = TypingService.activateApp(pid: pid)
         let focusedElementRestored = TypingService.restoreCapturedFocus(in: pid)
+        self.appBench(
+            "focus_restore_result activated=\(activated) element=\(focusedElementRestored) elapsedMs=\(Int(((ProcessInfo.processInfo.systemUptime - startedAt) * 1000).rounded()))"
+        )
         DebugLogger.shared.debug(
             "Restore focus -> appActivated: \(activated), elementFocusRestored: \(focusedElementRestored), targetPID: \(pid)",
             source: "ContentView"
@@ -2607,6 +2639,7 @@ struct ContentView: View {
             // Small delay to allow focus to settle before typing events fire.
             let settleNanos: UInt64 = 10_000_000
             try? await Task.sleep(nanoseconds: settleNanos)
+            self.appBench("focus_restore_settle_done delayMs=10")
         }
     }
 
@@ -3103,20 +3136,37 @@ extension ContentView {
 
     private func beginDictationRecording(for slot: SettingsStore.DictationShortcutSlot, mode: ActiveRecordingMode) {
         DebugLogger.shared.debug("Begin dictation recording for slot \(slot.rawValue)", source: "ContentView")
+        self.appBench("begin_recording slot=\(slot.rawValue) mode=\(mode.rawValue)")
         self.captureRecordingContext()
         self.applyDictationShortcutSelectionContext(for: slot)
         self.setActiveRecordingMode(mode)
         self.rewriteModeService.clearState()
+        self.appBench("overlay_mode_request mode=Dictation")
         self.menuBarManager.setOverlayMode(.dictation)
+        self.appBench("overlay_mode_requested mode=Dictation")
         self.prewarmPrivateAIDictationIfNeeded(for: slot)
 
-        guard !self.asr.isRunning else { return }
+        guard !self.asr.isRunning else {
+            self.appBench("asr_start_skipped reason=already_running")
+            return
+        }
         if SettingsStore.shared.enableTranscriptionSounds {
             TranscriptionSoundPlayer.shared.playStartSound()
         }
         Task {
+            let asrStartStartedAt = ProcessInfo.processInfo.systemUptime
+            DebugLogger.shared.benchmark("APP_BENCH", message: "asr_start_call", source: "AppBenchmark")
             await self.asr.start()
+            DebugLogger.shared.benchmark(
+                "APP_BENCH",
+                message: "asr_start_return elapsedMs=\(Int(((ProcessInfo.processInfo.systemUptime - asrStartStartedAt) * 1000).rounded()))",
+                source: "AppBenchmark"
+            )
         }
+    }
+
+    private func appBench(_ message: String) {
+        DebugLogger.shared.benchmark("APP_BENCH", message: message, source: "AppBenchmark")
     }
 
     private func callOpenAIChat() async {

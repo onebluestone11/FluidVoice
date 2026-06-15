@@ -231,22 +231,29 @@ final class TypingService {
     /// Types/inserts text, optionally preferring a specific target PID for CGEvent posting.
     /// This helps when our overlay temporarily has focus; we can still target the original app.
     func typeTextInstantly(_ text: String, preferredTargetPID: pid_t?) {
+        let requestedAt = ProcessInfo.processInfo.systemUptime
+        let mode = self.textInsertionMode
+        let settleDelayMs = mode == .reliablePaste ? 80 : 200
+        self.bench("request chars=\(text.count) mode=\(mode.rawValue) preferredPID=\(preferredTargetPID.map { String($0) } ?? "nil")")
         self.log("[TypingService] ENTRY: typeTextInstantly called with text length: \(text.count)")
         self.log("[TypingService] Text preview: \"\(String(text.prefix(100)))\"")
 
         guard text.isEmpty == false else {
+            self.bench("request_return reason=empty_text")
             self.log("[TypingService] ERROR: Empty text provided, aborting")
             return
         }
 
         // Prevent concurrent typing operations
         guard !self.isCurrentlyTyping else {
+            self.bench("request_return reason=already_typing")
             self.log("[TypingService] WARNING: Skipping text injection - already in progress")
             return
         }
 
         // Check accessibility permissions first
         guard AXIsProcessTrusted() else {
+            self.bench("request_return reason=accessibility_not_trusted")
             self.log("[TypingService] ERROR: Accessibility permissions required for text injection")
             self.log("[TypingService] Current accessibility status: \(AXIsProcessTrusted())")
             return
@@ -256,22 +263,44 @@ final class TypingService {
         self.isCurrentlyTyping = true
 
         DispatchQueue.global(qos: .userInitiated).async {
+            let workerStartedAt = ProcessInfo.processInfo.systemUptime
+            self.bench("worker_start queueDelayMs=\(Self.elapsedMs(from: requestedAt, to: workerStartedAt))")
+
             defer {
                 self.isCurrentlyTyping = false
+                self.bench("complete totalMs=\(Self.elapsedMs(since: requestedAt))")
                 self.log("[TypingService] Typing operation completed, isCurrentlyTyping set to false")
             }
 
             self.log("[TypingService] Starting async text insertion process")
-            if self.textInsertionMode == .reliablePaste {
+            if mode == .reliablePaste {
                 // Reliable Paste still needs a short settle window after focus restoration.
                 usleep(80_000)
             } else {
                 // Direct typing paths are more timing-sensitive after app activation.
                 usleep(200_000)
             }
+            self.bench("settle_delay_done delayMs=\(settleDelayMs) elapsedMs=\(Self.elapsedMs(since: requestedAt))")
             self.log("[TypingService] Delay completed, calling insertTextInstantly")
+            let insertStartedAt = ProcessInfo.processInfo.systemUptime
+            self.bench("insert_call")
             self.insertTextInstantly(text, preferredTargetPID: preferredTargetPID)
+            self.bench(
+                "insert_return elapsedMs=\(Self.elapsedMs(since: insertStartedAt)) totalMs=\(Self.elapsedMs(since: requestedAt))"
+            )
         }
+    }
+
+    private func bench(_ message: String) {
+        DebugLogger.shared.benchmark("TYPING_BENCH", message: message, source: "TypingBenchmark")
+    }
+
+    private static func elapsedMs(since start: TimeInterval) -> Int {
+        Int(((ProcessInfo.processInfo.systemUptime - start) * 1000).rounded())
+    }
+
+    private static func elapsedMs(from start: TimeInterval, to end: TimeInterval) -> Int {
+        Int(((end - start) * 1000).rounded())
     }
 
     // MARK: - Internal insertion pipeline

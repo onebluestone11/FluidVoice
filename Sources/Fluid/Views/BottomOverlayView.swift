@@ -52,6 +52,9 @@ final class BottomOverlayWindowController {
     }
 
     func show(audioPublisher: AnyPublisher<CGFloat, Never>, mode: OverlayMode) {
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        Self.overlayBench("bottom_show_start mode=\(mode.rawValue) windowExists=\(self.window != nil)")
+
         self.endReleaseTransition(flushDeferredUpdate: false)
         self.pendingResizeWorkItem?.cancel()
         self.pendingResizeWorkItem = nil
@@ -91,15 +94,24 @@ final class BottomOverlayWindowController {
         // Show with animation
         self.window?.alphaValue = 0
         self.window?.orderFrontRegardless()
+        Self.overlayBench("bottom_order_front elapsedMs=\(Self.elapsedMs(since: startedAt))")
 
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.25
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             self.window?.animator().alphaValue = 1
+        } completionHandler: {
+            let elapsedMs = Int(((ProcessInfo.processInfo.systemUptime - startedAt) * 1000).rounded())
+            Task { @MainActor in
+                Self.overlayBench("bottom_fade_complete elapsedMs=\(elapsedMs)")
+            }
         }
     }
 
     func hide() {
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        Self.overlayBench("bottom_hide_start windowExists=\(self.window != nil)")
+
         // Cancel audio subscription
         self.audioSubscription?.cancel()
         self.audioSubscription = nil
@@ -120,6 +132,7 @@ final class BottomOverlayWindowController {
         guard let window = window else {
             self.endReleaseTransition(flushDeferredUpdate: false)
             NotchContentState.shared.setBottomOverlayDismissing(false)
+            Self.overlayBench("bottom_hide_return reason=no_window")
             return
         }
 
@@ -133,6 +146,10 @@ final class BottomOverlayWindowController {
             window.animator().alphaValue = 0
         } completionHandler: {
             window.orderOut(nil)
+            let elapsedMs = Int(((ProcessInfo.processInfo.systemUptime - startedAt) * 1000).rounded())
+            Task { @MainActor in
+                Self.overlayBench("bottom_hide_complete elapsedMs=\(elapsedMs)")
+            }
             Task { @MainActor in
                 self.endReleaseTransition(flushDeferredUpdate: false)
                 NotchContentState.shared.setBottomOverlayDismissing(false)
@@ -141,6 +158,7 @@ final class BottomOverlayWindowController {
     }
 
     func setProcessing(_ processing: Bool) {
+        Self.overlayBench("bottom_set_processing processing=\(processing)")
         NotchContentState.shared.setProcessing(processing)
     }
 
@@ -184,6 +202,14 @@ final class BottomOverlayWindowController {
         if shouldFlush, self.window?.isVisible == true {
             self.scheduleSizeAndPositionUpdate(after: 0)
         }
+    }
+
+    private static func overlayBench(_ message: String) {
+        DebugLogger.shared.benchmark("OVERLAY_BENCH", message: message, source: "OverlayBenchmark")
+    }
+
+    private static func elapsedMs(since start: TimeInterval) -> Int {
+        Int(((ProcessInfo.processInfo.systemUptime - start) * 1000).rounded())
     }
 
     private func scheduleSizeAndPositionUpdate(after delay: TimeInterval = 0.08) {

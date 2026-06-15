@@ -97,15 +97,21 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
     }
 
     private func handleOverlayState(isRunning: Bool, asrService: ASRService) {
+        self.overlayBench("handle_state isRunning=\(isRunning) overlayVisible=\(self.overlayVisible) processing=\(self.isProcessingActive) mode=\(self.currentOverlayMode.rawValue)")
+
         // Don't hide the overlay while AI processing is active.
         // Without this, the notch can disappear during the short "Refining..." phase because
         // `isRunning` becomes false before post-processing completes.
         if !isRunning, self.isProcessingActive {
+            self.overlayBench("handle_state_return reason=processing_active")
             return
         }
 
         // Prevent rapid state changes that could cause cycles
-        guard self.overlayVisible != isRunning else { return }
+        guard self.overlayVisible != isRunning else {
+            self.overlayBench("handle_state_return reason=visibility_unchanged")
+            return
+        }
 
         if isRunning {
             // Cancel any pending hide operation
@@ -113,6 +119,7 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
             self.pendingHideOperation = nil
 
             self.overlayVisible = true
+            self.overlayBench("show_request mode=\(self.currentOverlayMode.rawValue)")
 
             // If expanded command output is showing, check if we should keep it or close it
             if NotchOverlayManager.shared.isCommandOutputExpanded {
@@ -151,10 +158,12 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
                 }
 
                 // Show notch overlay
+                self.overlayBench("show_workitem_execute mode=\(self.currentOverlayMode.rawValue)")
                 NotchOverlayManager.shared.show(
                     audioLevelPublisher: asrService.audioLevelPublisher,
                     mode: self.currentOverlayMode
                 )
+                self.overlayBench("show_workitem_return mode=\(self.currentOverlayMode.rawValue)")
 
                 self.pendingShowOperation = nil
             }
@@ -166,6 +175,7 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
             self.pendingShowOperation = nil
 
             self.overlayVisible = false
+            self.overlayBench("hide_request delayMs=30")
 
             // If expanded command output is showing, don't hide it - let it stay visible
             if NotchOverlayManager.shared.isCommandOutputExpanded {
@@ -188,7 +198,9 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
                 }
 
                 // Hide notch overlay
+                self.overlayBench("hide_workitem_execute")
                 NotchOverlayManager.shared.hide()
+                self.overlayBench("hide_workitem_return")
 
                 self.pendingHideOperation = nil
             }
@@ -204,11 +216,14 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
     }
 
     func setOverlayMode(_ mode: OverlayMode) {
+        self.overlayBench("set_mode mode=\(mode.rawValue)")
         self.currentOverlayMode = mode
         NotchOverlayManager.shared.setMode(mode)
     }
 
     func setProcessing(_ processing: Bool) {
+        self.overlayBench("set_processing_request processing=\(processing) overlayVisible=\(self.overlayVisible) active=\(self.isProcessingActive)")
+
         // Track processing state to prevent hide during AI refinement
         self.isProcessingActive = processing
 
@@ -221,7 +236,9 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
 
             let showItem = DispatchWorkItem { [weak self] in
                 guard let self = self, self.isProcessingActive else { return }
+                self.overlayBench("processing_show_workitem_execute delayMs=100")
                 NotchOverlayManager.shared.setProcessing(true)
+                self.overlayBench("processing_show_workitem_return")
                 self.pendingProcessingShowOperation = nil
             }
             self.pendingProcessingShowOperation = showItem
@@ -236,6 +253,7 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
             if NotchOverlayManager.shared.isCommandOutputExpanded {
                 self.pendingHideOperation = nil
                 NotchOverlayManager.shared.setProcessing(processing)
+                self.overlayBench("set_processing_return reason=expanded_command_output")
                 return
             }
 
@@ -248,14 +266,21 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
                     return
                 }
 
+                self.overlayBench("processing_hide_workitem_execute delayMs=100")
                 NotchOverlayManager.shared.hide()
+                self.overlayBench("processing_hide_workitem_return")
                 self.pendingHideOperation = nil
             }
             self.pendingHideOperation = hideItem
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(100), execute: hideItem)
             NotchOverlayManager.shared.setProcessing(false)
+            self.overlayBench("processing_forwarded processing=false hideDelayMs=100")
             return
         }
+    }
+
+    private func overlayBench(_ message: String) {
+        DebugLogger.shared.benchmark("OVERLAY_BENCH", message: "manager \(message)", source: "OverlayBenchmark")
     }
 
     private func setupMenuBarSafely() {

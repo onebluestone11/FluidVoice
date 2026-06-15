@@ -72,6 +72,7 @@ struct SettingsBackupPayload: Codable, Equatable {
     let selectedDictationPromptID: String?
     let dictationPromptOff: Bool?
     let dictationPromptRoutingScope: SettingsStore.PromptRoutingScope?
+    let editPromptOff: Bool?
     let selectedEditPromptID: String?
     let editPromptRoutingScope: SettingsStore.PromptRoutingScope?
     let defaultDictationPromptOverride: String?
