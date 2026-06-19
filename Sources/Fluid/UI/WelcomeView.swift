@@ -38,6 +38,10 @@ struct WelcomeView: View {
     private var commandModeColor: Color { self.theme.palette.warning }
     private var editModeColor: Color { self.theme.palette.accent }
 
+    private var isAIEnhancementReady: Bool {
+        DictationAIPostProcessingGate.isConfigured()
+    }
+
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -128,11 +132,11 @@ struct WelcomeView: View {
 
                                 SetupStepView(
                                     step: 4,
-                                    title: self.settings.isAIConfigured ? "AI Enhancement Configured" : "Set Up AI Enhancement (Optional)",
-                                    description: self.settings.isAIConfigured
+                                    title: self.isAIEnhancementReady ? "AI Enhancement Configured" : "Set Up AI Enhancement (Optional)",
+                                    description: self.isAIEnhancementReady
                                         ? "AI-powered text enhancement is ready to use"
                                         : "Configure API keys for AI-powered text enhancement",
-                                    status: self.settings.isAIConfigured ? .completed : .pending,
+                                    status: self.isAIEnhancementReady ? .completed : .pending,
                                     action: {
                                         self.selectedSidebarItem = .aiEnhancements
                                     },
