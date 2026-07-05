@@ -1,0 +1,147 @@
+using System.ComponentModel;
+using System.Runtime.CompilerServices;
+using System.Windows.Input;
+using FluidVoice.Services;
+
+namespace FluidVoice.ViewModels;
+
+public sealed class MainViewModel : INotifyPropertyChanged
+{
+    private readonly AudioCaptureService _audioCaptureService;
+    private readonly MockTranscriptionService _transcriptionService;
+    private CancellationTokenSource? _dictationCancellation;
+    private bool _isDictating;
+    private string _transcriptText = "Press Start Dictation to begin mock transcription.";
+    private string _statusText = "Ready";
+
+    public MainViewModel(
+        AudioCaptureService audioCaptureService,
+        MockTranscriptionService transcriptionService)
+    {
+        _audioCaptureService = audioCaptureService;
+        _transcriptionService = transcriptionService;
+        StartDictationCommand = new RelayCommand(StartDictation, () => !IsDictating);
+        StopDictationCommand = new RelayCommand(StopDictation, () => IsDictating);
+    }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    public ICommand StartDictationCommand { get; }
+
+    public ICommand StopDictationCommand { get; }
+
+    public bool IsDictating
+    {
+        get => _isDictating;
+        private set
+        {
+            if (SetProperty(ref _isDictating, value))
+            {
+                RaiseCommandStatesChanged();
+            }
+        }
+    }
+
+    public string TranscriptText
+    {
+        get => _transcriptText;
+        private set => SetProperty(ref _transcriptText, value);
+    }
+
+    public string StatusText
+    {
+        get => _statusText;
+        private set => SetProperty(ref _statusText, value);
+    }
+
+    private async void StartDictation()
+    {
+        if (IsDictating)
+        {
+            return;
+        }
+
+        _dictationCancellation = new CancellationTokenSource();
+        IsDictating = true;
+        StatusText = "Listening with mock transcription...";
+        TranscriptText = string.Empty;
+
+        try
+        {
+            await _audioCaptureService.StartAsync(_dictationCancellation.Token);
+
+            await foreach (string phrase in _transcriptionService.StreamTranscriptAsync(_dictationCancellation.Token))
+            {
+                TranscriptText += phrase;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Stop Dictation uses cancellation for the normal stop path.
+        }
+        finally
+        {
+            await _audioCaptureService.StopAsync();
+            _dictationCancellation?.Dispose();
+            _dictationCancellation = null;
+            IsDictating = false;
+            StatusText = TranscriptText.Length == 0 ? "Ready" : "Stopped";
+        }
+    }
+
+    private void StopDictation()
+    {
+        if (!IsDictating)
+        {
+            return;
+        }
+
+        StatusText = "Stopping...";
+        _dictationCancellation?.Cancel();
+    }
+
+    private bool SetProperty<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
+    {
+        if (EqualityComparer<T>.Default.Equals(field, value))
+        {
+            return false;
+        }
+
+        field = value;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        return true;
+    }
+
+    private static void RaiseCommandStatesChanged()
+    {
+        CommandManager.InvalidateRequerySuggested();
+    }
+}
+
+internal sealed class RelayCommand : ICommand
+{
+    private readonly Action _execute;
+    private readonly Func<bool> _canExecute;
+
+    public RelayCommand(Action execute, Func<bool> canExecute)
+    {
+        _execute = execute;
+        _canExecute = canExecute;
+    }
+
+    public event EventHandler? CanExecuteChanged
+    {
+        add => CommandManager.RequerySuggested += value;
+        remove => CommandManager.RequerySuggested -= value;
+    }
+
+    public bool CanExecute(object? parameter)
+    {
+        return _canExecute();
+    }
+
+    public void Execute(object? parameter)
+    {
+        _execute();
+    }
+}
