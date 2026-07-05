@@ -1,0 +1,34 @@
+name: Windows MVP CI
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'windows-mvp/**'
+      - '.github/workflows/windows-mvp.yml'
+  push:
+    branches: [ main ]
+    paths:
+      - 'windows-mvp/**'
+      - '.github/workflows/windows-mvp.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Windows MVP
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup .NET 10.0
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '10.0.x'
+        
+    - name: Build FluidVoice Windows MVP
+      run: dotnet build .\windows-mvp\FluidVoice.sln
