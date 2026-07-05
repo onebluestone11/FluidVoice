@@ -3,20 +3,32 @@ name: Build and Test
 on:
   pull_request:
     branches: [ main ]
-    paths-ignore:
-      - 'windows-mvp/**'
   push:
     branches: [ main ]
-    paths-ignore:
-      - 'windows-mvp/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Path filter
+    runs-on: ubuntu-latest
+    outputs:
+      run_macos: ${{ steps.filter.outputs.macos }}
+    steps:
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            macos:
+              - '**'
+              - '!windows-mvp/**'
+
   build:
     name: Build FluidVoice
+    needs: changes
+    if: ${{ needs.changes.outputs.run_macos == 'true' }}
     runs-on: macos-latest
     timeout-minutes: 40
     
