@@ -1,9 +1,12 @@
+using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace FluidVoice.Services;
 
-public sealed class MockTranscriptionService
+public sealed class MockTranscriptionService : ITranscriptionService
 {
     private static readonly string[] Phrases =
     [
