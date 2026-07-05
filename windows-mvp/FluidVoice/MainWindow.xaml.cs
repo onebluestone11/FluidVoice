@@ -11,6 +11,7 @@ public partial class MainWindow : Window
         InitializeComponent();
         DataContext = new MainViewModel(
             new AudioCaptureService(),
-            new MockTranscriptionService());
+            new MockTranscriptionService(),
+            new LocalSettingsService());
     }
 }

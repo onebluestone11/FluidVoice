@@ -7,19 +7,22 @@ namespace FluidVoice.ViewModels;
 
 public sealed class MainViewModel : INotifyPropertyChanged
 {
-    private readonly AudioCaptureService _audioCaptureService;
-    private readonly MockTranscriptionService _transcriptionService;
+    private readonly IAudioCaptureService _audioCaptureService;
+    private readonly ITranscriptionService _transcriptionService;
+    private readonly ISettingsService _settingsService;
     private CancellationTokenSource? _dictationCancellation;
     private bool _isDictating;
     private string _transcriptText = "Press Start Dictation to begin mock transcription.";
     private string _statusText = "Ready";
 
     public MainViewModel(
-        AudioCaptureService audioCaptureService,
-        MockTranscriptionService transcriptionService)
+        IAudioCaptureService audioCaptureService,
+        ITranscriptionService transcriptionService,
+        ISettingsService settingsService)
     {
         _audioCaptureService = audioCaptureService;
         _transcriptionService = transcriptionService;
+        _settingsService = settingsService;
         StartDictationCommand = new RelayCommand(StartDictation, () => !IsDictating);
         StopDictationCommand = new RelayCommand(StopDictation, () => IsDictating);
     }
