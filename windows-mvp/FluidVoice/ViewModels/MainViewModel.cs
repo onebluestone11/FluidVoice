@@ -12,6 +12,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private readonly ISettingsService _settingsService;
     private CancellationTokenSource? _dictationCancellation;
     private bool _isDictating;
+    private double _audioLevel;
     private string _transcriptText = "Press Start Dictation to begin mock transcription.";
     private string _statusText = "Ready";
 
@@ -57,6 +58,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
         private set => SetProperty(ref _statusText, value);
     }
 
+    public double AudioLevel
+    {
+        get => _audioLevel;
+        private set => SetProperty(ref _audioLevel, value);
+    }
+
     private async void StartDictation()
     {
         if (IsDictating)
@@ -71,7 +78,36 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
         try
         {
-            await _audioCaptureService.StartAsync(_dictationCancellation.Token);
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await foreach (var chunk in _audioCaptureService.CaptureAsync(_dictationCancellation.Token))
+                    {
+                        float maxVal = 0f;
+                        if (chunk.BitsPerSample == 32)
+                        {
+                            for (int i = 0; i < chunk.PcmBytes.Length; i += 4)
+                            {
+                                float sample = Math.Abs(BitConverter.ToSingle(chunk.PcmBytes, i));
+                                if (sample > maxVal) maxVal = sample;
+                            }
+                        }
+                        else if (chunk.BitsPerSample == 16)
+                        {
+                            for (int i = 0; i < chunk.PcmBytes.Length; i += 2)
+                            {
+                                float sample = Math.Abs((float)BitConverter.ToInt16(chunk.PcmBytes, i) / 32768f);
+                                if (sample > maxVal) maxVal = sample;
+                            }
+                        }
+                        
+                        if (maxVal > 1.0f) maxVal = 1.0f;
+                        AudioLevel = maxVal;
+                    }
+                }
+                catch (OperationCanceledException) { }
+            });
 
             await foreach (string phrase in _transcriptionService.StreamTranscriptAsync(_dictationCancellation.Token))
             {
@@ -84,10 +120,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
         finally
         {
-            await _audioCaptureService.StopAsync();
             _dictationCancellation?.Dispose();
             _dictationCancellation = null;
             IsDictating = false;
+            AudioLevel = 0.0;
             StatusText = TranscriptText.Length == 0 ? "Ready" : "Stopped";
         }
     }

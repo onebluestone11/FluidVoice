@@ -20,6 +20,14 @@
             <TextBlock Text="{Binding StatusText}"
                        Margin="0,6,0,0"
                        Foreground="#555555" />
+            <ProgressBar Minimum="0"
+                         Maximum="1"
+                         Value="{Binding AudioLevel, Mode=OneWay}"
+                         Height="4"
+                         Margin="0,8,0,0"
+                         BorderThickness="0"
+                         Background="#E0E0E0"
+                         Foreground="#007ACC" />
         </StackPanel>
 
         <TextBox Grid.Row="1"

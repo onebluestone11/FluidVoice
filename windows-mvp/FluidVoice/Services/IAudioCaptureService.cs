@@ -1,10 +1,9 @@
+using System.Collections.Generic;
 using System.Threading;
-using System.Threading.Tasks;
 
 namespace FluidVoice.Services;
 
 public interface IAudioCaptureService
 {
-    Task StartAsync(CancellationToken cancellationToken);
-    Task StopAsync();
+    IAsyncEnumerable<AudioChunk> CaptureAsync(CancellationToken cancellationToken);
 }
