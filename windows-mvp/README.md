@@ -25,3 +25,5 @@ Currently, the application uses mock services:
 
 ## No-Secrets Rule
 **IMPORTANT**: Do not commit secrets, API keys, or credentials to this repository. All real transcription API keys or sensitive configurations must be loaded from local environment variables or external secure storage that is not tracked by Git.
+
+- Added real microphone capture via NAudio/WASAPI.
